@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<?!= include('Styles'); ?>
+</head>
+<body>
+<h1 id="title">Ładowanie…</h1>
+
+<div id="identity" hidden>
+  <p id="who"></p>
+  <form id="indexForm">
+    <input type="text" id="index" maxlength="12" placeholder="np. 272727" inputmode="numeric" autocomplete="off" aria-label="Numer indeksu" required>
+    <button type="submit" id="indexBtn">Dalej</button>
+  </form>
+  <p id="indexMsg" class="error"></p>
+</div>
+
+<div id="content" hidden>
+  <hr>
+  <form id="entryForm">
+    <p>
+      <label for="date">Zajęcia:</label><br>
+      <select id="date" required></select>
+    </p>
+    <p>
+      <label><input type="checkbox" id="present" checked> Byłem/byłam na zajęciach</label>
+    </p>
+    <p>
+      <label for="pluses">Plusy na tych zajęciach:</label><br>
+      <input type="number" id="pluses" min="0" step="1" value="0" inputmode="numeric" required>
+    </p>
+    <p><button type="submit" id="saveBtn">Zapisz</button></p>
+  </form>
+  <p id="noLessons" hidden>Teraz nie ma zajęć do zgłoszenia.</p>
+  <p id="toast" role="status" aria-live="polite"></p>
+  <div id="gradeBox" hidden>
+    <hr>
+    <h2>Ocena z laboratorium</h2>
+    <form id="gradeForm">
+      <input type="text" id="grade" maxlength="6" inputmode="decimal" placeholder="np. 4.5" autocomplete="off" aria-label="Ocena z laboratorium" required>
+      <button type="submit" id="gradeBtn">Zapisz ocenę</button>
+    </form>
+    <p id="gradeInfo"></p>
+  </div>
+
+  <hr>
+  <h2>Twoje zajęcia</h2>
+  <table>
+    <thead><tr><th>Data</th><th>Obecność</th><th>Plusy</th></tr></thead>
+    <tbody id="lessons"></tbody>
+  </table>
+</div>
+
+<div id="admin" hidden>
+  <hr>
+  <h2>Organizator</h2>
+  <ul>
+    <li><a id="sheetLink" target="_blank" rel="noopener">Otwórz arkusz</a></li>
+    <li><a id="xlsxLink" target="_blank" rel="noopener">Pobierz raport (.xlsx)</a></li>
+    <li><button type="button" id="gradesToggle"></button></li>
+    <li><button type="button" id="exportBtn">Eksportuj raport do nowego Arkusza Google</button></li>
+  </ul>
+  <p id="exportResult" hidden>Wyeksportowano: <a id="exportLink" target="_blank" rel="noopener"></a></p>
+</div>
+<script>var FORCE_ORG = <?!= forceOrg ?>;</script>
+<?!= include('App'); ?>
+</body>
+</html>

@@ -1,0 +1,276 @@
+<script>
+(function () {
+  'use strict';
+
+  var state = null;
+  var busy = false;
+  var INDEX_KEY = 'attendance.index';
+
+  function $(id) { return document.getElementById(id); }
+
+  function el(tag, props) {
+    var node = document.createElement(tag);
+    Object.keys(props || {}).forEach(function (k) {
+      if (k === 'text') node.textContent = props[k];
+      else if (k === 'on') Object.keys(props.on).forEach(function (e) { node.addEventListener(e, props.on[e]); });
+      else if (props[k] !== false && props[k] != null) node.setAttribute(k, props[k] === true ? '' : props[k]);
+    });
+    for (var i = 2; i < arguments.length; i++) if (arguments[i]) node.appendChild(arguments[i]);
+    return node;
+  }
+
+  function call(fn, arg) {
+    return new Promise(function (resolve, reject) {
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](arg);
+    });
+  }
+
+  var client = {
+    deviceId: deviceId(),
+    userAgent: navigator.userAgent,
+    language: navigator.language || '',
+    timeZone: timeZone(),
+    screen: screen.width + 'x' + screen.height,
+    ip: ''
+  };
+
+  // losowe id w localStorage, do logu
+  function deviceId() {
+    var key = 'attendance.device', id = '';
+    try { id = localStorage.getItem(key) || ''; } catch (e) {}
+    if (!id) {
+      id = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+      try { localStorage.setItem(key, id); } catch (e) {}
+    }
+    return id;
+  }
+
+  function timeZone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { return ''; }
+  }
+
+  // serwer nie widzi ip, wiec przegladarka sama sprawdza
+  function lookUpIp() {
+    if (!window.fetch) return;
+    fetch('https://api.ipify.org?format=json')
+      .then(function (r) { return r.json(); })
+      .then(function (d) { client.ip = String(d.ip || ''); })
+      .catch(function () {});
+  }
+
+  // czy pytac serwer o organizatora: 'no' = juz sprawdzone na tym urzadzeniu, nie pytaj wiecej
+  var ORG_KEY = 'attendance.org';
+  function askOrg() {
+    if (window.FORCE_ORG) return true;
+    try { return localStorage.getItem(ORG_KEY) !== 'no'; } catch (e) { return true; }
+  }
+  function rememberOrg(asked) {
+    if (!asked) return;
+    try { localStorage.setItem(ORG_KEY, state.admin ? 'yes' : 'no'); } catch (e) {}
+  }
+
+  function savedIndex() { try { return localStorage.getItem(INDEX_KEY) || ''; } catch (e) { return ''; } }
+  function storeIndex(n) { try { localStorage.setItem(INDEX_KEY, n); } catch (e) {} }
+
+  function toast(msg, isError) {
+    var t = $('toast');
+    t.textContent = String(msg).replace(/^(Error|Exception):\s*/, '');
+    t.className = isError ? 'error' : /\.\.\.$/.test(t.textContent) ? 'wait' : '';
+  }
+  function fail(err) {
+    var msg = String((err && err.message) || err).replace(/^(Error|Exception):\s*/, '');
+    if (!state || $('content').hidden) $('indexMsg').textContent = msg; else toast(msg, true);
+  }
+
+  function prettyDate(s) {
+    var p = s.split('-');
+    return new Date(+p[0], +p[1] - 1, +p[2]).toLocaleDateString('pl-PL',
+      { day: '2-digit', month: '2-digit', year: 'numeric' });
+  }
+
+  function cfg() { return state.config; }
+
+  function lessonOn(date) {
+    return state.lessons.filter(function (l) { return l.date === date; })[0] || null;
+  }
+
+  function fillForm() {
+    var saved = lessonOn($('date').value);
+    var reported = !!(saved && saved.present);
+    $('present').checked = true;
+    $('pluses').value = reported ? saved.pluses : 0;
+    syncForm();
+  }
+
+  function syncForm() {
+    $('pluses').disabled = !$('present').checked;
+    if (!$('present').checked) $('pluses').value = 0;
+    var saved = lessonOn($('date').value);
+    $('saveBtn').textContent = busy ? 'Zapisuję...' : saved && saved.present ? 'Popraw' : 'Zapisz';
+    $('saveBtn').disabled = busy;
+  }
+
+  function render() {
+    var cfg = state.config, user = state.user;
+    document.title = cfg.title;
+    $('title').textContent = cfg.title;
+
+    $('identity').hidden = false;
+    $('who').textContent = user.needsIndex
+      ? 'Wpisz swój numer indeksu, żeby zacząć (zapamięta się na tym urządzeniu).'
+      : user.isNew
+        ? 'Numer indeksu (pierwszy raz, sprawdź czy na pewno dobry!):'
+        : 'Numer indeksu:';
+    if (document.activeElement !== $('index')) $('index').value = user.index || '';
+    $('indexBtn').textContent = user.needsIndex ? 'Dalej' : 'Zmień';
+
+    renderAdmin();
+
+    $('content').hidden = user.needsIndex;
+    if (user.needsIndex) return;
+
+    // lista terminow do wyboru: tylko te ktore wolno zglosic, najnowszy na gorze
+    var date = $('date'), chosen = date.value;
+    var open = state.lessons.filter(function (l) { return l.editable; }).reverse();
+    date.textContent = '';
+    open.forEach(function (l) { date.appendChild(el('option', { value: l.date, text: prettyDate(l.date) })); });
+    var kept = open.some(function (l) { return l.date === chosen; });
+    if (open.length) date.value = kept ? chosen : open[0].date;
+    $('entryForm').hidden = !open.length;
+    $('noLessons').hidden = !!open.length;
+    if (cfg.maxPluses > 0) $('pluses').max = cfg.maxPluses; else $('pluses').removeAttribute('max');
+    if (kept) syncForm(); else fillForm();
+
+    var list = $('lessons');
+    list.textContent = '';
+    if (!state.lessons.length) {
+      list.appendChild(el('tr', null, el('td', { colspan: '3', text: 'Nie było jeszcze zajęć.' })));
+    }
+    state.lessons.slice().reverse().forEach(function (l) {
+      list.appendChild(el('tr', null,
+        el('td', { text: prettyDate(l.date) }),
+        el('td', { text: l.present ? 'tak' : '-' }),
+        el('td', { text: l.present ? String(l.pluses) : '-' })));
+    });
+    renderGrade();
+  }
+
+  // ocena z labow: formularz tylko gdy organizator wlaczyl, zapisana ocena widoczna zawsze
+  function renderGrade() {
+    var cfg = state.config, mine = state.user.grade;
+    $('gradeBox').hidden = !cfg.gradesOpen && !mine;
+    $('gradeForm').hidden = !cfg.gradesOpen;
+    if (document.activeElement !== $('grade') && !$('grade').value) $('grade').value = mine || '';
+    $('gradeBtn').textContent = mine ? 'Popraw ocenę' : 'Zapisz ocenę';
+    $('gradeBtn').disabled = busy;
+    $('gradeInfo').textContent = mine ? 'Zgłoszona ocena: ' + mine : 'Jeszcze nie zgłoszono.';
+  }
+
+  function renderAdmin() {
+    var admin = state.admin;
+    $('admin').hidden = !admin;
+    if (!admin) return;
+    $('sheetLink').href = admin.sheetUrl;
+    $('xlsxLink').href = admin.xlsxUrl;
+    $('exportBtn').disabled = busy;
+    $('gradesToggle').disabled = busy;
+    $('gradesToggle').textContent = state.config.gradesOpen
+      ? 'Wyłącz zgłaszanie ocen z labów (teraz: włączone)'
+      : 'Włącz zgłaszanie ocen z labów (teraz: wyłączone)';
+  }
+
+  function run(fn, arg, okMessage) {
+    if (busy) return Promise.resolve(false);
+    busy = true;
+    if (okMessage) toast('Zapisuję, nie zamykaj strony...');
+    if (state) render();
+    return call(fn, arg).then(function (next) {
+      state = next;
+      if (okMessage) toast(okMessage);
+      return true;
+    }, function (err) {
+      fail(err);
+      return false;
+    }).then(function (ok) {
+      busy = false;
+      if (state) render();
+      return ok;
+    });
+  }
+
+  // przegladarka pyta "na pewno wyjsc?" jak zapis jeszcze leci (na telefonach rzadko dziala)
+  window.addEventListener('beforeunload', function (e) {
+    if (!busy) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
+  function wholeNumber(text) {
+    var n = Number(text);
+    return String(text).trim() !== '' && n >= 0 && Math.floor(n) === n ? n : null;
+  }
+
+  function load(index) {
+    var org = askOrg();
+    return call('getState', { index: index, org: org }).then(function (next) {
+      state = next;
+      $('grade').value = '';
+      $('toast').textContent = '';
+      rememberOrg(org);
+      if (state.user.index) storeIndex(state.user.index);
+      render();
+      fillForm();
+      $('indexMsg').textContent = index && state.user.needsIndex
+        ? 'To nie wygląda na numer indeksu' + (cfg().indexLength ? ' (ma mieć ' + cfg().indexLength + ' cyfr).' : ' (same cyfry).')
+        : '';
+    }, fail);
+  }
+
+  $('indexForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var index = $('index').value.trim();
+    if (!index) return;
+    $('index').blur();
+    load(index);
+  });
+
+  $('date').addEventListener('change', fillForm);
+  $('present').addEventListener('change', syncForm);
+
+  $('entryForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var pluses = wholeNumber($('pluses').value);
+    if (!$('date').value || pluses === null) {
+      toast('Liczba plusów musi być liczbą całkowitą, 0 lub więcej.', true);
+      return;
+    }
+    run('saveEntry', { index: state.user.index, date: $('date').value, present: $('present').checked, pluses: pluses, client: client, org: askOrg() }, 'Zapisano')
+      .then(function (ok) { if (ok) fillForm(); });
+  });
+
+  $('gradeForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    run('saveGrade', { index: state.user.index, grade: $('grade').value, client: client, org: askOrg() }, 'Zapisano ocenę')
+      .then(function (ok) { if (ok) $('grade').value = state.user.grade; });
+  });
+
+  $('gradesToggle').addEventListener('click', function () {
+    run('setGradesOpen', { index: state.user.index, open: !state.config.gradesOpen });
+  });
+
+  $('exportBtn').addEventListener('click', function () {
+    if (busy) return;
+    busy = true;
+    render();
+    call('exportReport').then(function (res) {
+      $('exportLink').href = res.url;
+      $('exportLink').textContent = res.name;
+      $('exportResult').hidden = false;
+      toast('Raport wyeksportowany');
+    }, fail).then(function () { busy = false; render(); });
+  });
+
+  lookUpIp();
+  load(savedIndex());
+})();
+</script>
